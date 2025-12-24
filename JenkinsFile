@@ -5,25 +5,29 @@ pipeline {
       args '--user root -v /var/run/docker.sock:/var/run/docker.sock'
     }
   }
+
   environment {
-        DOCKER_IMAGE="smkayathiri/gcp-app:${BUILD_NUMBER}"
-        REGISTRY_CREDENTIALS=credentials('docker-cred')
+    DOCKER_IMAGE = "smkayathiri/gcp-app:${BUILD_NUMBER}"
+    REGISTRY_CREDENTIALS = credentials('docker-cred')
+  }
 
+  stages {
 
-      }
-  stages{
-    
     stage('Checkout GCP Secure CI pipeline') {
-            steps {
-                git branch: 'main', credentialsId: 'github-token', url: 'https://github.com/somameenakayathirim/gcp-secure-app-ci-pipeline.git'
-            }
-        } 
-    stage ('Build Maven') {
-      steps { 
+      steps {
+        git branch: 'main',
+            credentialsId: 'github-token',
+            url: 'https://github.com/somameenakayathirim/gcp-secure-app-ci-pipeline.git'
+      }
+    }
+
+    stage('Build Maven') {
+      steps {
         sh 'cd spring-boot-app && mvn clean package'
       }
     }
-	 stage('Static Code Analysis') {
+
+    stage('Static Code Analysis') {
       environment {
         SONAR_URL = credentials('sonarqube-url')
       }
@@ -33,106 +37,62 @@ pipeline {
         }
       }
     }
-	stage('Unit Testing') {
+
+    stage('Unit Testing') {
       steps {
-        echo 'Running unit tests...'
         sh 'cd spring-boot-app && mvn test'
       }
     }
-    stage('Build docker Image and push to Docker hub') {
-      
+
+    stage('Build Docker Image and Push') {
       steps {
         script {
           sh 'cd spring-boot-app && docker build -t ${DOCKER_IMAGE} .'
           def dockerImage = docker.image("${DOCKER_IMAGE}")
-		  env.IMAGE_NAME = "${DOCKER_IMAGE}"
-          docker.withRegistry("https://index.docker.io/v1/","docker-cred"){
+          docker.withRegistry("https://index.docker.io/v1/", "docker-cred") {
             dockerImage.push()
           }
         }
       }
     }
 
+    stage('Trivy Scan') {
+      steps {
+        sh '''
+          wget -q https://github.com/aquasecurity/trivy/releases/download/v0.52.2/trivy_0.52.2_Linux-64bit.deb
+          dpkg -i trivy_0.52.2_Linux-64bit.deb
+          trivy image --exit-code 0 --severity LOW,MEDIUM ${DOCKER_IMAGE}
+        '''
+      }
+    }
 
-	 stage('Perform Trivy Scan') {
-    steps {
-        script {
-            // Install wget and Trivy without sudo
-            sh '''
-            echo "Checking if wget is installed..."
-            if ! command -v wget &> /dev/null; then
-                echo "wget not found. Installing wget..."
-                apt-get update
-                apt-get install -y wget
-            fi
+    stage('Checkout K8s YAML Repo') {   
+      steps {
+        git branch: 'main',
+            credentialsId: 'github-token',
+            url: 'https://github.com/somameenakayathirim/gcp-secure-app-cd-pipeline.git'
+      }
+    }
 
-            echo "Downloading Trivy .deb package..."
-            wget https://github.com/aquasecurity/trivy/releases/download/v0.52.2/trivy_0.52.2_Linux-64bit.deb
+    stage('Update Helm values.yaml') {
+      environment {
+        GIT_REPO_NAME = "gcp-secure-app-cd-pipeline"
+        GIT_USER_NAME = "somameenakayathirim"
+      }
+      steps {
+        withCredentials([string(credentialsId: 'github', variable: 'GIT_AUTH_TOKEN')]) {
+          sh """
+            git config user.email "somameenakayathiri@example.com"
+            git config user.name "${GIT_USER_NAME}"
 
-            echo "Installing Trivy..."
-            dpkg -i trivy_0.52.2_Linux-64bit.deb
+            sed -i "s/replaceImageTag/${BUILD_NUMBER}/g" helm/values.yaml
 
-            echo "Verifying Trivy installation..."
-            trivy --version
-            '''
-
-            // Perform Trivy Scan
-            echo "Scanning for vulnerabilities in Docker image..."
-            sh '''
-            trivy image --exit-code 0 --severity LOW,MEDIUM ${DOCKER_IMAGE}
-            '''
+            git add helm/values.yaml
+            git commit -m "Update image to ${BUILD_NUMBER}"
+            git push https://${GIT_AUTH_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git main
+          """
         }
+      }
     }
   }
-
-
-  stage('Checkout K8s YAML Repo') {
-            steps {
-                git branch: 'main', credentialsId: 'github-token', url: 'https://github.com/somameenakayathirim/gcp-secure-app-cd-pipeline.git'
-            }
-        } 
-
-  stage('Update helm values.yaml with New Docker Image') {
-            environment {
-                GIT_REPO_NAME = "gcp-secure-app-cd-pipeline"
-                GIT_USER_NAME = "somameenakayathirim"
-            }
-            steps {
-                withCredentials([string(credentialsId: 'github', variable: 'GIT_AUTH_TOKEN')]) {
-                    sh """
-                    set -e  # Exit on any command failure
-
-                    # Configure Git user details
-                    git config user.email "somameenakayathiri@example.com"
-                    git config user.name "${GIT_USER_NAME}"
-
-                    # Print file before updating
-                    echo "=== BEFORE ==="
-                    cat helm/values.yaml
-
-                    # Check for existing image pattern
-                    echo "Checking for existing image in values.yaml:"
-                    grep "image:" helm/values.yaml || echo "Pattern not found. Proceeding with replacement."
-
-                    # Update helm values.yaml file with the new Docker image tag
-                    sed -i "s/replaceImageTag/${BUILD_NUMBER}/g" helm/values.yaml
-                    
-                    # Print file after updating to confirm changes
-                    echo "=== AFTER ==="
-                    cat helm/values.yaml
-
-                    # Check if there are any changes to commit
-                    if git diff --quiet; then
-                        echo "No changes to commit. Skipping commit."
-                    else
-                        # Commit and push changes to the repository
-                        git add helm/values.yaml
-                        git commit -m "Updated helm values.yaml to version ${IMAGE_TAG}"
-                        git push https://${GIT_AUTH_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:main
-                    fi
-                    """
-                    }
-             }
-        }
-
-  }
+}
