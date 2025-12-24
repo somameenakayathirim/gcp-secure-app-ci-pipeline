@@ -59,6 +59,15 @@ pipeline {
     stage('Trivy Scan') {
       steps {
         sh '''
+          set -e
+
+          echo "Installing prerequisites..."
+          if ! command -v wget >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y wget curl
+          fi
+
+          echo "Downloading Trivy..."
           wget -q https://github.com/aquasecurity/trivy/releases/download/v0.52.2/trivy_0.52.2_Linux-64bit.deb
           dpkg -i trivy_0.52.2_Linux-64bit.deb
           trivy image --exit-code 0 --severity LOW,MEDIUM ${DOCKER_IMAGE}
